@@ -2,7 +2,13 @@ from typing import Any, List, Dict, Optional, Union
 import asyncio
 import logging
 from mcp.server.fastmcp import FastMCP
-from sci_hub_search import search_paper_by_doi, search_paper_by_title, search_papers_by_keyword, download_paper
+from sci_hub_search import (
+    search_paper_by_doi,
+    search_paper_by_title,
+    search_papers_by_keyword,
+    download_paper,
+    download_papers_batch,
+)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -90,16 +96,21 @@ async def search_scihub_by_keyword(keyword: str, num_results: int = 10) -> List[
         return [{"error": f"An error occurred while searching by keyword: {str(e)}"}]
 
 @mcp.tool()
-async def download_scihub_pdf(pdf_url: str, output_path: str) -> str:
-    logging.info(f"Attempting to download PDF from {pdf_url} to {output_path}")
+async def download_scihub_pdf(pdf_url: str, output_path: str, retries: int = 2) -> str:
+    logging.info(f"Attempting to download PDF from {pdf_url} to {output_path} (retries={retries})")
     """
     Download a paper PDF from Sci-Hub.
 
     Args:
-        pdf_url (str): The URL of the PDF to download. This should be a direct link to the PDF file,
-                 typically obtained from a previous search result's 'pdf_url' field.
+        pdf_url (str): The target to download. Accepts a direct link to the PDF file
+                 (typically from a previous search result's 'pdf_url' field), a DOI
+                 (e.g. "10.1038/171737a0"), a doi.org URL, or a Sci-Hub mirror page URL
+                 (the PDF link is extracted from the page).
         output_path (str): The file path where the downloaded PDF should be saved.
                      Should include the filename with .pdf extension.
+        retries (int, optional): Number of extra attempts after the first one when the
+                     failure is transient (timeout, 5xx, 429, HTML challenge page).
+                     Defaults to 2 (3 attempts total). Use 0 to disable retries.
 
     Returns:
         str: A message indicating the download result:
@@ -108,13 +119,66 @@ async def download_scihub_pdf(pdf_url: str, output_path: str) -> str:
              - Error message with exception details if an error occurred
     """
     try:
-        success = await asyncio.to_thread(download_paper, pdf_url, output_path)
+        success = await asyncio.to_thread(
+            download_paper, pdf_url, output_path, retries=retries
+        )
         if success:
             return f"PDF successfully downloaded to {output_path}"
         else:
             return f"Failed to download PDF to {output_path}"
     except Exception as e:
         return f"An error occurred while downloading PDF: {str(e)}"
+
+@mcp.tool()
+async def download_scihub_pdfs_batch(
+    items: List[str],
+    output_dir: str,
+    retries: int = 2,
+    concurrency: int = 2,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    logging.info(
+        f"Batch download of {len(items)} item(s) into {output_dir} "
+        f"(retries={retries}, concurrency={concurrency}, overwrite={overwrite})"
+    )
+    """
+    Download several papers at once, with per-item retries and a JSON manifest.
+
+    Each item may be a DOI (e.g. "10.1038/171737a0"), a direct PDF URL, a doi.org
+    URL, or a Sci-Hub mirror page URL. Filenames are derived from the DOI/URL and
+    sanitized for the filesystem; name collisions get numeric suffixes.
+
+    Args:
+        items (List[str]): DOIs or URLs to download. Duplicates are removed.
+        output_dir (str): Directory where the PDFs (and the manifest) are written.
+                Created if missing.
+        retries (int, optional): Extra attempts per item after the first one for
+                transient failures. Defaults to 2 (3 attempts total).
+        concurrency (int, optional): Number of parallel downloads, clamped to 1-4.
+                Defaults to 2.
+        overwrite (bool, optional): When False (default), existing valid PDFs with
+                the same derived filename are skipped.
+
+    Returns:
+        Dict[str, Any]: Summary with keys:
+            - output_dir: Absolute output directory
+            - manifest: Path to the timestamped JSON manifest (or None on failure)
+            - total: Number of processed items
+            - success / skipped / failed: Counts per status
+            - results: List of per-item records with input, status, path, size,
+              attempts, pdf_url, title and error
+    """
+    try:
+        return await asyncio.to_thread(
+            download_papers_batch,
+            items,
+            output_dir,
+            retries=retries,
+            concurrency=concurrency,
+            overwrite=overwrite,
+        )
+    except Exception as e:
+        return {"error": f"An error occurred while running the batch download: {str(e)}"}
 
 @mcp.tool()
 async def get_paper_metadata(doi: str) -> Dict[str, Any]:
